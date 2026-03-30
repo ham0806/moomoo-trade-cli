@@ -1,0 +1,41 @@
+repos:
+# codex-mvh: begin
+- repo: local
+  hooks:
+    - id: mvh-format
+      name: mvh-format
+      entry: pwsh
+      args:
+        - -NoProfile
+        - -Command
+        - 'mise exec -- uv run ruff format --check .'
+      language: system
+      pass_filenames: false
+    - id: mvh-lint
+      name: mvh-lint
+      entry: pwsh
+      args:
+        - -NoProfile
+        - -Command
+        - 'mise exec -- uv run ruff check .'
+      language: system
+      pass_filenames: false
+    - id: mvh-typecheck
+      name: mvh-typecheck
+      entry: pwsh
+      args:
+        - -NoProfile
+        - -Command
+        - 'mise exec -- uv run mypy .'
+      language: system
+      pass_filenames: false
+    - id: mvh-test
+      name: mvh-test
+      entry: pwsh
+      args:
+        - -NoProfile
+        - -Command
+        - 'mise exec -- uv run pytest -q'
+      language: system
+      pass_filenames: false
+# codex-mvh: end

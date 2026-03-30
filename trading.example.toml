@@ -1,0 +1,21 @@
+account_id = "YOUR_ACCOUNT_ID"
+strategy = "noop"
+poll_interval_seconds = 30
+allow_live = false
+credential_name = "YOUR_CREDENTIAL_NAME"
+
+[risk_limits]
+max_daily_orders = 5
+max_daily_notional = 100000
+max_open_orders_per_symbol = 1
+cancel_after_seconds = 300
+
+[[symbols]]
+code = "AAPL"
+market = "US"
+max_position_qty = 100
+max_order_qty = 100
+allowed_sides = ["BUY", "SELL", "SELL_SHORT", "BUY_BACK"]
+allowed_order_types = ["NORMAL", "MARKET"]
+allowed_time_in_force = ["DAY", "GTC"]
+allowed_sessions = ["RTH"]

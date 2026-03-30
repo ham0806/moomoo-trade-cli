@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "moomoo-trade-cli"
+version = "0.1.0"
+description = "moomoo OpenD 経由で売買・照会を行う CLI"
+readme = "README.md"
+requires-python = ">=3.8,<3.9"
+dependencies = [
+  "moomoo-api>=10,<11",
+  "pandas>=1.4,<3",
+  "keyring>=25,<26",
+  "tomli>=2,<3",
+]
+
+[project.scripts]
+moomoo-accounts = "moomoo_trader.cli:accounts_entrypoint"
+moomoo-balance = "moomoo_trader.cli:balance_entrypoint"
+moomoo-trade-engine = "moomoo_trader.cli:trade_engine_entrypoint"
+moomoo-orders = "moomoo_trader.cli:orders_entrypoint"
+moomoo-positions = "moomoo_trader.cli:positions_entrypoint"
+moomoo-deals = "moomoo_trader.cli:deals_entrypoint"
+moomoo-place-order = "moomoo_trader.cli:place_order_entrypoint"
+moomoo-modify-order = "moomoo_trader.cli:modify_order_entrypoint"
+moomoo-max-trade-qty = "moomoo_trader.cli:max_trade_qty_entrypoint"
+moomoo-order-fees = "moomoo_trader.cli:order_fees_entrypoint"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.13,<2",
+  "pre-commit>=3.5,<3.6",
+  "pytest>=8.3,<9",
+  "ruff>=0.8,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/moomoo_trader"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+exclude = [
+  ".venv",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.8"
+exclude = '^(tests|docs|\.venv)/'
+ignore_missing_imports = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+warn_unused_configs = true
