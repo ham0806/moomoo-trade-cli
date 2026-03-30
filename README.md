@@ -159,7 +159,7 @@ Copy-Item .\trading.example.toml .\trading.toml
 実口座で `allow_live = true` を使う場合だけ必要です。
 
 ```powershell
-mise exec -- uv run python -c "import keyring; keyring.set_password('moomoo-trade-cli', 'main-live', 'YOUR_TRADE_PASSWORD')"
+mise exec -- uv run python -c "import getpass, keyring; keyring.set_password('moomoo-trade-cli', 'main-live', getpass.getpass('Trade password: '))"
 ```
 
 取得確認は以下です。

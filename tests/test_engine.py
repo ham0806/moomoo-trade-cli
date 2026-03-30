@@ -290,7 +290,7 @@ class TradingEngineTest(unittest.TestCase):
 
         with patch("moomoo_trader.engine.load_strategy", return_value=strategy), patch(
             "moomoo_trader.engine.get_trade_password",
-            return_value="secret",
+            return_value="mock-password",
         ):
             engine = TradingEngine(
                 opend_config=self.opend_config,
@@ -303,7 +303,7 @@ class TradingEngineTest(unittest.TestCase):
             engine.bootstrap()
             engine.close()
 
-        self.assertEqual("secret", FakeGateway.last_instance.unlocked_password)
+        self.assertEqual("mock-password", FakeGateway.last_instance.unlocked_password)
 
 
 if __name__ == "__main__":
