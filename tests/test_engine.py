@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from moomoo_trader.config import OpenDConfig
 from moomoo_trader.engine import TradingEngine
+from moomoo_trader.errors import ApiCallError
 from moomoo_trader.models import (
     BalanceSnapshot,
     MarketSnapshot,
@@ -304,6 +305,193 @@ class TradingEngineTest(unittest.TestCase):
             engine.close()
 
         self.assertEqual("mock-password", FakeGateway.last_instance.unlocked_password)
+
+    def _build_engine(self, strategy, stdout=None, stderr=None, sleep_fn=None):
+        kwargs = {
+            "opend_config": self.opend_config,
+            "trading_config": self.trading_config,
+            "env_name": "simulate",
+            "gateway_cls": FakeGateway,
+        }
+        if stdout is not None:
+            kwargs["stdout"] = stdout
+        if stderr is not None:
+            kwargs["stderr"] = stderr
+        if sleep_fn is not None:
+            kwargs["sleep_fn"] = sleep_fn
+        return TradingEngine(**kwargs)
+
+    def test_設定にない銘柄のintentはAPIを呼ばずに拒否する(self):
+        strategy = FakeStrategy(
+            [
+                TradeIntent(
+                    code="AAPL",
+                    market="US",
+                    side="BUY",
+                    qty=10,
+                    limit_price=100,
+                    strategy_id="fake-strategy",
+                )
+            ]
+        )
+        stdout = io.StringIO()
+
+        with patch("moomoo_trader.engine.load_strategy", return_value=strategy):
+            engine = self._build_engine(strategy, stdout=stdout)
+            summary = engine.run_once()
+            engine.close()
+
+        gateway = FakeGateway.last_instance
+        assert gateway is not None
+        self.assertEqual([], summary["placed_orders"])
+        self.assertEqual(1, len(summary["rejected_orders"]))
+        self.assertIn("設定ファイルに存在しない", summary["rejected_orders"][0]["reason"])
+        self.assertEqual([], gateway.max_trade_qty_queries)
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertTrue(any(event["event"] == "intent_rejected" for event in events))
+
+    def test_limit_priceなしのintentは拒否して残りを処理する(self):
+        strategy = FakeStrategy(
+            [
+                TradeIntent(
+                    code="7203",
+                    market="JP",
+                    side="BUY",
+                    qty=10,
+                    limit_price=None,
+                    strategy_id="fake-strategy",
+                ),
+                TradeIntent(
+                    code="7203",
+                    market="JP",
+                    side="BUY",
+                    qty=10,
+                    limit_price=1000,
+                    strategy_id="fake-strategy",
+                    order_type="MARKET",
+                    time_in_force="GTC",
+                ),
+            ]
+        )
+
+        with patch("moomoo_trader.engine.load_strategy", return_value=strategy):
+            engine = self._build_engine(strategy)
+            summary = engine.run_once()
+            engine.close()
+
+        gateway = FakeGateway.last_instance
+        assert gateway is not None
+        self.assertEqual(["1"], summary["placed_orders"])
+        self.assertEqual(1, len(summary["rejected_orders"]))
+        self.assertEqual(1, len(gateway.max_trade_qty_queries))
+
+    def test_数量照会が失敗しても残りのintentを処理する(self):
+        strategy = FakeStrategy(
+            [
+                TradeIntent(
+                    code="7203",
+                    market="JP",
+                    side="BUY",
+                    qty=10,
+                    limit_price=1000,
+                    strategy_id="fake-strategy",
+                    order_type="MARKET",
+                    time_in_force="GTC",
+                ),
+                TradeIntent(
+                    code="7203",
+                    market="JP",
+                    side="BUY",
+                    qty=20,
+                    limit_price=1000,
+                    strategy_id="fake-strategy",
+                    order_type="MARKET",
+                    time_in_force="GTC",
+                ),
+            ]
+        )
+        original = FakeGateway.query_max_trade_qtys
+        calls = []
+
+        def flaky(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise ApiCallError("最大取引数量取得に失敗しました")
+            return original(self, **kwargs)
+
+        with patch("moomoo_trader.engine.load_strategy", return_value=strategy), patch.object(
+            FakeGateway, "query_max_trade_qtys", flaky
+        ):
+            engine = self._build_engine(strategy)
+            summary = engine.run_once()
+            engine.close()
+
+        self.assertEqual(2, len(calls))
+        self.assertEqual(["1"], summary["placed_orders"])
+        self.assertEqual(1, len(summary["rejected_orders"]))
+        self.assertIn("最大取引数量取得", summary["rejected_orders"][0]["reason"])
+
+    def test_常駐ループは一時エラーを記録して継続する(self):
+        strategy = FakeStrategy([])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        sleeps = []
+        outcomes = [
+            ApiCallError("一時的な API エラー"),
+            ApiCallError("一時的な API エラー"),
+            {"placed_orders": [], "rejected_orders": []},
+            KeyboardInterrupt(),
+        ]
+
+        def fake_run_once():
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        with patch("moomoo_trader.engine.load_strategy", return_value=strategy):
+            engine = self._build_engine(
+                strategy,
+                stdout=stdout,
+                stderr=stderr,
+                sleep_fn=sleeps.append,
+            )
+            engine.run_once = fake_run_once
+            engine.start()
+
+        self.assertEqual([], outcomes)
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        errors = [event for event in events if event["event"] == "engine_cycle_error"]
+        self.assertEqual(2, len(errors))
+        self.assertEqual(2, errors[-1]["consecutive_failures"])
+        self.assertEqual([1, 2, 1], sleeps)
+        self.assertIn("停止要求", stderr.getvalue())
+        self.assertTrue(FakeGateway.last_instance.closed)
+
+    def test_連続失敗の上限で常駐を終了する(self):
+        strategy = FakeStrategy([])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def fake_run_once():
+            raise ApiCallError("永続的な API エラー")
+
+        with patch("moomoo_trader.engine.load_strategy", return_value=strategy):
+            engine = self._build_engine(
+                strategy,
+                stdout=stdout,
+                stderr=stderr,
+                sleep_fn=lambda seconds: None,
+            )
+            engine.run_once = fake_run_once
+            with self.assertRaises(ApiCallError):
+                engine.start()
+
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        errors = [event for event in events if event["event"] == "engine_cycle_error"]
+        self.assertEqual(engine.MAX_CONSECUTIVE_CYCLE_FAILURES, len(errors))
+        self.assertIn("連続", stderr.getvalue())
+        self.assertTrue(FakeGateway.last_instance.closed)
 
 
 if __name__ == "__main__":

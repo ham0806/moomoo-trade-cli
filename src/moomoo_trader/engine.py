@@ -25,6 +25,9 @@ from .trading_config import TradingConfig
 
 
 class TradingEngine:
+    MAX_CONSECUTIVE_CYCLE_FAILURES = 5
+    MAX_CYCLE_FAILURE_BACKOFF_SECONDS = 300
+
     def __init__(
         self,
         *,
@@ -75,67 +78,67 @@ class TradingEngine:
         assert self.risk_manager is not None
 
         placed_orders = []
-        rejected_orders = []
+        rejected_orders: List[Dict[str, object]] = []
 
         for intent in intents:
-            if intent.expires_at is not None and intent.expires_at < now:
-                rejected_orders.append(
-                    {"intent": intent.intent_signature, "reason": "有効期限切れです。"}
+            try:
+                if intent.expires_at is not None and intent.expires_at < now:
+                    self._reject_intent(intent, rejected_orders, "有効期限切れです。")
+                    continue
+
+                static_decision = self.risk_manager.evaluate_static(
+                    intent,
+                    portfolio_state,
+                    daily_order_count=len(self.today_orders),
+                    daily_notional=self._daily_notional(),
                 )
+                if static_decision is not None:
+                    self._reject_intent(intent, rejected_orders, static_decision.reason)
+                    continue
+
+                current_position = self._resolve_position(intent)
+                jp_acc_type_name = self.gateway.resolve_jp_acc_type(intent.side)
+                session_name = self._resolve_session(intent)
+                max_trade_qtys = self.gateway.query_max_trade_qtys(
+                    full_code=intent.full_code,
+                    order_type_name=intent.order_type,
+                    price=float(intent.limit_price),
+                    session_name=session_name,
+                    jp_acc_type_name=jp_acc_type_name,
+                    position_id=current_position.position_id if current_position else None,
+                )
+
+                decision = self.risk_manager.evaluate(
+                    intent,
+                    portfolio_state,
+                    max_trade_qtys,
+                    daily_order_count=len(self.today_orders),
+                    daily_notional=self._daily_notional(),
+                )
+                if not decision.accepted:
+                    self._reject_intent(intent, rejected_orders, decision.reason)
+                    continue
+
+                order = self._place_order(
+                    intent,
+                    session_name=session_name,
+                    jp_acc_type_name=jp_acc_type_name,
+                    position=current_position,
+                )
+                placed_orders.append(order.order_id)
+                self.today_orders.append(order)
+                self.order_ledger.upsert_order(order)
                 self._emit_event(
-                    "intent_rejected", intent=intent.intent_signature, reason="有効期限切れです。"
+                    "order_submitted",
+                    order_id=order.order_id,
+                    code=order.full_code,
+                    qty=order.qty,
+                    price=order.price,
+                    strategy_id=intent.strategy_id,
                 )
-                continue
-
-            current_position = self._resolve_position(intent)
-            jp_acc_type_name = self.gateway.resolve_jp_acc_type(intent.side)
-            session_name = self._resolve_session(intent)
-            max_trade_qtys = self.gateway.query_max_trade_qtys(
-                full_code=intent.full_code,
-                order_type_name=intent.order_type,
-                price=float(intent.limit_price),
-                session_name=session_name,
-                jp_acc_type_name=jp_acc_type_name,
-                position_id=current_position.position_id if current_position else None,
-            )
-
-            decision = self.risk_manager.evaluate(
-                intent,
-                portfolio_state,
-                max_trade_qtys,
-                daily_order_count=len(self.today_orders),
-                daily_notional=self._daily_notional(),
-            )
-            if not decision.accepted:
-                rejected_orders.append(
-                    {"intent": intent.intent_signature, "reason": decision.reason}
-                )
-                self._emit_event(
-                    "intent_rejected",
-                    intent=intent.intent_signature,
-                    reason=decision.reason,
-                    code=intent.full_code,
-                )
-                continue
-
-            order = self._place_order(
-                intent,
-                session_name=session_name,
-                jp_acc_type_name=jp_acc_type_name,
-                position=current_position,
-            )
-            placed_orders.append(order.order_id)
-            self.today_orders.append(order)
-            self.order_ledger.upsert_order(order)
-            self._emit_event(
-                "order_submitted",
-                order_id=order.order_id,
-                code=order.full_code,
-                qty=order.qty,
-                price=order.price,
-                strategy_id=intent.strategy_id,
-            )
-            portfolio_state = self._portfolio_state()
+                portfolio_state = self._portfolio_state()
+            except Exception as exc:
+                self._reject_intent(intent, rejected_orders, str(exc))
 
         summary = {
             "env": self.env_name,
@@ -153,10 +156,33 @@ class TradingEngine:
         self.bootstrap()
         self._emit_stderr("自動売買エンジンを開始します。Ctrl+C で停止します。")
 
+        consecutive_failures = 0
         try:
             while True:
-                self.run_once()
-                self.sleep_fn(self.trading_config.poll_interval_seconds)
+                try:
+                    self.run_once()
+                    consecutive_failures = 0
+                    delay = self.trading_config.poll_interval_seconds
+                except Exception as exc:
+                    consecutive_failures += 1
+                    self._emit_event(
+                        "engine_cycle_error",
+                        error=str(exc),
+                        consecutive_failures=consecutive_failures,
+                    )
+                    if consecutive_failures >= self.MAX_CONSECUTIVE_CYCLE_FAILURES:
+                        self._emit_stderr(
+                            "エラーが {} 回連続したためエンジンを終了します。".format(
+                                consecutive_failures
+                            )
+                        )
+                        raise
+                    delay = min(
+                        self.trading_config.poll_interval_seconds
+                        * (2 ** (consecutive_failures - 1)),
+                        self.MAX_CYCLE_FAILURE_BACKOFF_SECONDS,
+                    )
+                self.sleep_fn(delay)
         except KeyboardInterrupt:
             self._emit_stderr("停止要求を受けたためエンジンを終了します。")
         finally:
@@ -292,6 +318,21 @@ class TradingEngine:
     def _resolve_position(self, intent: TradeIntent) -> Optional[PositionSnapshot]:
         return self.position_ledger.get(intent.full_code)
 
+    def _reject_intent(
+        self,
+        intent: TradeIntent,
+        rejected_orders: List[Dict[str, object]],
+        reason: str,
+    ) -> None:
+        label = _intent_label(intent)
+        rejected_orders.append({"intent": label, "reason": reason})
+        self._emit_event(
+            "intent_rejected",
+            intent=label,
+            reason=reason,
+            code=_intent_code(intent),
+        )
+
     def _resolve_session(self, intent: TradeIntent) -> Optional[str]:
         if intent.market.upper() != "US":
             return None
@@ -299,8 +340,8 @@ class TradingEngine:
         if intent.session:
             return intent.session.upper()
 
-        symbol = self._symbol_map[intent.full_code]
-        if symbol.allowed_sessions:
+        symbol = self._symbol_map.get(intent.full_code)
+        if symbol is not None and symbol.allowed_sessions:
             return symbol.allowed_sessions[0]
         return None
 
@@ -331,3 +372,21 @@ class TradingEngine:
     def _emit_stderr(self, message: str) -> None:
         self.stderr.write(message + "\n")
         self.stderr.flush()
+
+
+def _intent_label(intent: TradeIntent) -> str:
+    try:
+        return intent.intent_signature
+    except Exception:  # pragma: no cover - 不正な intent の保険
+        pass
+    try:
+        return "{}|{}".format(intent.strategy_id, intent.full_code)
+    except Exception:  # pragma: no cover - 不正な intent の保険
+        return repr(intent)
+
+
+def _intent_code(intent: TradeIntent) -> Optional[str]:
+    try:
+        return intent.full_code
+    except Exception:  # pragma: no cover - 不正な intent の保険
+        return None
