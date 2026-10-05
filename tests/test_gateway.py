@@ -68,6 +68,21 @@ class FakeTradeContext:
             }
         ]
 
+    def history_deal_list_query(self, **kwargs):
+        self.history_deal_kwargs = kwargs
+        return 0, [
+            {
+                "deal_id": "10",
+                "order_id": "1",
+                "code": "JP.7203",
+                "trd_side": "BUY",
+                "qty": 10,
+                "price": 1000,
+                "status": "FILLED_ALL",
+                "create_time": "2026-03-30T09:00:00",
+            }
+        ]
+
 
 class GatewayTest(unittest.TestCase):
     def setUp(self):
@@ -76,6 +91,7 @@ class GatewayTest(unittest.TestCase):
             env_name="real",
             account_id="123",
         )
+        self.gateway.account = {"acc_id": "123"}
         self.gateway.trade_context = FakeTradeContext()
         self.gateway.quote_context = object()
 
@@ -145,6 +161,34 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(["1"], self.gateway.trade_context.order_fee_query_kwargs["order_id_list"])
         self.assertEqual("1", payload[0]["order_id"])
         self.assertEqual(12.3, payload[0]["fee_amount"])
+
+    def test_クエリは解決済み口座のacc_idを使う(self):
+        self.gateway.account = {"acc_id": "456"}
+
+        payload = self.gateway.query_deal_records(
+            start_date="2026-03-30",
+            end_date="2026-03-30",
+        )
+
+        self.assertEqual(456, self.gateway.trade_context.history_deal_kwargs["acc_id"])
+        self.assertEqual("10", payload[0]["deal_id"])
+
+    def test_account_id未指定なら口座を自動選択する(self):
+        gateway = MoomooGateway(
+            config=OpenDConfig(host="127.0.0.1", port=11111),
+            env_name="real",
+            account_id=None,
+        )
+
+        with patch(
+            "moomoo_trader.gateway.list_accounts",
+            return_value=[{"acc_id": "456", "trd_env": "REAL"}],
+        ):
+            account = gateway.resolve_account()
+
+        self.assertIsNone(gateway.account_id)
+        self.assertEqual("456", account["acc_id"])
+        self.assertEqual(456, gateway._resolved_acc_id())
 
 
 if __name__ == "__main__":

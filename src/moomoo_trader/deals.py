@@ -19,7 +19,7 @@ def fetch_deals(
     gateway = MoomooGateway(
         config=config,
         env_name=env_name,
-        account_id=str(account_id or ""),
+        account_id=account_id,
     )
 
     try:
