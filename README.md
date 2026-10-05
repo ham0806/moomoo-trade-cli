@@ -190,6 +190,8 @@ mise exec -- uv run moomoo-trade-engine start --config .\trading.toml --env simu
 mise exec -- uv run moomoo-trade-engine once --config .\trading.toml --env real
 ```
 
+常駐中に API / 接続エラーが発生した場合は `engine_cycle_error` イベントを出力して次サイクルへ継続します(失敗回数に応じて間隔を伸ばします)。エラーが 5 回連続した場合はエンジンが終了するので、自動再起動が必要なら systemd の `Restart=on-failure` やタスク スケジューラの再起動設定と組み合わせてください。
+
 ## 検証
 
 ```powershell

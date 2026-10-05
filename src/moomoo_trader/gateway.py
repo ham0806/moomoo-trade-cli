@@ -35,12 +35,12 @@ class MoomooGateway:
         self,
         config: OpenDConfig,
         env_name: str,
-        account_id: str,
+        account_id: Optional[str],
         event_queue: Optional[Queue] = None,
     ) -> None:
         self.config = config
         self.env_name = env_name.lower()
-        self.account_id = str(account_id)
+        self.account_id = str(account_id) if account_id else None
         self.event_queue = event_queue
         self.account: Optional[Dict[str, Any]] = None
         self.trade_context: Any = None
@@ -82,6 +82,10 @@ class MoomooGateway:
             account_id=self.account_id,
         )
         return self.account
+
+    def _resolved_acc_id(self) -> int:
+        account = self.resolve_account()
+        return int(account["acc_id"])
 
     def market_authorities(self) -> Dict[str, bool]:
         account = self.resolve_account()
@@ -134,7 +138,7 @@ class MoomooGateway:
         self.connect()
         ret, data = self.trade_context.position_list_query(
             trd_env=self.sdk_trd_env,
-            acc_id=int(self.account_id),
+            acc_id=self._resolved_acc_id(),
             refresh_cache=refresh,
             position_market=self.sdk.TrdMarket.NONE,
             asset_category=self.sdk.AssetCategory.NONE,
@@ -151,7 +155,7 @@ class MoomooGateway:
         self.connect()
         ret, data = self.trade_context.order_list_query(
             trd_env=self.sdk_trd_env,
-            acc_id=int(self.account_id),
+            acc_id=self._resolved_acc_id(),
             refresh_cache=refresh,
             order_market=self.sdk.TrdMarket.NONE,
         )
@@ -169,7 +173,7 @@ class MoomooGateway:
             start=target_date,
             end=target_date,
             trd_env=self.sdk_trd_env,
-            acc_id=int(self.account_id),
+            acc_id=self._resolved_acc_id(),
             order_market=self.sdk.TrdMarket.NONE,
         )
         if _is_data_not_ready(ret, data):
@@ -202,7 +206,7 @@ class MoomooGateway:
             start=start_date,
             end=end_date,
             trd_env=self.sdk_trd_env,
-            acc_id=int(self.account_id),
+            acc_id=self._resolved_acc_id(),
             deal_market=self.sdk.TrdMarket.NONE,
         )
         if _is_data_not_ready(ret, data) or _is_deal_list_unsupported(ret, data):
@@ -240,7 +244,7 @@ class MoomooGateway:
             code=full_code,
             price=price,
             trd_env=self.sdk_trd_env,
-            acc_id=int(self.account_id),
+            acc_id=self._resolved_acc_id(),
             session=parse_session(session_name or ""),
             jp_acc_type=parse_jp_acc_type(jp_acc_type_name),
             position_id=position_id,
@@ -272,7 +276,7 @@ class MoomooGateway:
             order_type=parse_order_type(order_type_name),
             time_in_force=parse_time_in_force(time_in_force_name),
             trd_env=self.sdk_trd_env,
-            acc_id=int(self.account_id),
+            acc_id=self._resolved_acc_id(),
             remark=remark,
             session=parse_session(session_name or ""),
             jp_acc_type=parse_jp_acc_type(jp_acc_type_name),
@@ -297,7 +301,7 @@ class MoomooGateway:
             qty=qty,
             price=price,
             trd_env=self.sdk_trd_env,
-            acc_id=int(self.account_id),
+            acc_id=self._resolved_acc_id(),
         )
         ensure_ret_ok(ret, data, "注文訂正")
         records = frame_to_records(data)
@@ -321,7 +325,7 @@ class MoomooGateway:
         ret, data = self.trade_context.order_fee_query(
             order_id_list=order_ids,
             trd_env=self.sdk_trd_env,
-            acc_id=int(self.account_id),
+            acc_id=self._resolved_acc_id(),
         )
         ensure_ret_ok(ret, data, "注文手数料取得")
         return [_normalize_fee_record(record) for record in frame_to_records(data)]

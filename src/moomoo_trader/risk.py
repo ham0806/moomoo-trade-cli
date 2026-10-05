@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .models import MaxTradeQtySnapshot, PortfolioState, RiskDecision, TradeIntent
 from .trading_config import RiskLimits, SymbolConfig
@@ -23,16 +23,16 @@ class RiskManager:
         self.risk_limits = risk_limits
         self.available_jp_acc_types = available_jp_acc_types
 
-    def evaluate(
+    def evaluate_static(
         self,
         intent: TradeIntent,
         portfolio_state: PortfolioState,
-        max_trade_qtys: MaxTradeQtySnapshot,
         *,
         daily_order_count: int,
         daily_notional: float,
-    ) -> RiskDecision:
-        notional = float(intent.qty) * float(intent.limit_price)
+    ) -> Optional[RiskDecision]:
+        """acctradinginfo_query の結果を必要としない判定だけを先に評価する。"""
+        notional = _intent_notional(intent)
 
         if self.env_name == "REAL" and not self.allow_live:
             return RiskDecision(
@@ -47,7 +47,9 @@ class RiskManager:
                 notional,
             )
 
-        if intent.qty <= 0 or intent.limit_price <= 0:
+        qty = _optional_number(intent.qty)
+        limit_price = _optional_number(intent.limit_price)
+        if qty is None or limit_price is None or qty <= 0 or limit_price <= 0:
             return RiskDecision(
                 False, "数量と価格は 0 より大きい必要があります。", intent, notional
             )
@@ -91,7 +93,7 @@ class RiskManager:
                     notional,
                 )
 
-        if intent.qty > symbol_config.max_order_qty:
+        if qty > symbol_config.max_order_qty:
             return RiskDecision(False, "1 回あたりの最大発注数量を超えています。", intent, notional)
 
         open_orders = portfolio_state.open_orders
@@ -124,12 +126,10 @@ class RiskManager:
                     intent,
                     notional,
                 )
-            if current_qty + intent.qty > symbol_config.max_position_qty:
+            if current_qty + qty > symbol_config.max_position_qty:
                 return RiskDecision(
                     False, "保有上限数量を超えるため買い注文を拒否しました。", intent, notional
                 )
-            if _safe_qty(max_trade_qtys.max_cash_buy) < intent.qty:
-                return RiskDecision(False, "最大買付可能数量を超えています。", intent, notional)
         elif intent.side == "SELL":
             if position_side == "SHORT":
                 return RiskDecision(
@@ -138,10 +138,7 @@ class RiskManager:
                     intent,
                     notional,
                 )
-            if (
-                intent.qty > sellable_qty
-                or _safe_qty(max_trade_qtys.max_position_sell) < intent.qty
-            ):
+            if qty > sellable_qty:
                 return RiskDecision(
                     False, "現物口座で売却可能数量を超えています。", intent, notional
                 )
@@ -160,15 +157,13 @@ class RiskManager:
                     intent,
                     notional,
                 )
-            if current_qty + intent.qty > symbol_config.max_position_qty:
+            if current_qty + qty > symbol_config.max_position_qty:
                 return RiskDecision(
                     False,
                     "ショート建玉上限数量を超えるため SELL_SHORT を拒否しました。",
                     intent,
                     notional,
                 )
-            if _safe_qty(max_trade_qtys.max_sell_short) < intent.qty:
-                return RiskDecision(False, "最大売建可能数量を超えています。", intent, notional)
         else:
             if not _has_short_subaccount(self.available_jp_acc_types):
                 return RiskDecision(
@@ -184,8 +179,43 @@ class RiskManager:
                     intent,
                     notional,
                 )
-            if intent.qty > current_qty or _safe_qty(max_trade_qtys.max_buy_back) < intent.qty:
+            if qty > current_qty:
                 return RiskDecision(False, "最大買戻可能数量を超えています。", intent, notional)
+
+        return None
+
+    def evaluate(
+        self,
+        intent: TradeIntent,
+        portfolio_state: PortfolioState,
+        max_trade_qtys: MaxTradeQtySnapshot,
+        *,
+        daily_order_count: int,
+        daily_notional: float,
+    ) -> RiskDecision:
+        decision = self.evaluate_static(
+            intent,
+            portfolio_state,
+            daily_order_count=daily_order_count,
+            daily_notional=daily_notional,
+        )
+        if decision is not None:
+            return decision
+
+        notional = _intent_notional(intent)
+        if intent.side == "BUY":
+            if _safe_qty(max_trade_qtys.max_cash_buy) < intent.qty:
+                return RiskDecision(False, "最大買付可能数量を超えています。", intent, notional)
+        elif intent.side == "SELL":
+            if _safe_qty(max_trade_qtys.max_position_sell) < intent.qty:
+                return RiskDecision(
+                    False, "現物口座で売却可能数量を超えています。", intent, notional
+                )
+        elif intent.side == "SELL_SHORT":
+            if _safe_qty(max_trade_qtys.max_sell_short) < intent.qty:
+                return RiskDecision(False, "最大売建可能数量を超えています。", intent, notional)
+        elif _safe_qty(max_trade_qtys.max_buy_back) < intent.qty:
+            return RiskDecision(False, "最大買戻可能数量を超えています。", intent, notional)
 
         return RiskDecision(True, "accepted", intent, notional)
 
@@ -198,3 +228,18 @@ def _safe_qty(value: Optional[float]) -> float:
     if value is None:
         return 0.0
     return float(value)
+
+
+def _intent_notional(intent: TradeIntent) -> float:
+    qty = _optional_number(intent.qty)
+    limit_price = _optional_number(intent.limit_price)
+    if qty is None or limit_price is None:
+        return 0.0
+    return qty * limit_price
+
+
+def _optional_number(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
