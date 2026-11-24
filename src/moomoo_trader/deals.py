@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from .config import OpenDConfig
 from .errors import MoomooTraderError
 from .gateway import MoomooGateway
-from .time_utils import today_text
+from .time_utils import market_today_text, today_text
 
 
 def fetch_deals(
@@ -24,9 +24,11 @@ def fetch_deals(
 
     try:
         gateway.connect()
-        target_start = start or today_text()
-        target_end = end or today_text()
         full_code = _normalize_symbol(symbol) if symbol else ""
+        # 省略時の日付は市場の現地日付に合わせる（米国市場の日付ずれを防ぐ）。
+        default_date = market_today_text(full_code.split(".", 1)[0]) if full_code else today_text()
+        target_start = start or default_date
+        target_end = end or default_date
         return gateway.query_deal_records(
             start_date=target_start,
             end_date=target_end,

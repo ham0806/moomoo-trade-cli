@@ -14,6 +14,20 @@ class ApiCallError(MoomooTraderError):
     """SDK 呼び出し自体は成功したが API がエラーを返した。"""
 
 
+class DataNotReadyError(ApiCallError):
+    """API は応答したが、口座データがまだ準備できていない。
+
+    空データ（保有なし・注文なし）と区別するため、空配列として扱ってはならない。
+    """
+
+
+class OrderResultUnknownError(MoomooTraderError):
+    """発注要求は送信されたが、証券側で受理されたか確認できない。
+
+    二重発注を避けるため、照合が完了するまで同じ注文意図を再送してはならない。
+    """
+
+
 class AccountSelectionError(MoomooTraderError):
     """対象口座を一意に選べなかった。"""
 

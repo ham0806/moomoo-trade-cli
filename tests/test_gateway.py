@@ -2,6 +2,11 @@ import unittest
 from unittest.mock import patch
 
 from moomoo_trader.config import OpenDConfig
+from moomoo_trader.errors import (
+    DataNotReadyError,
+    MoomooTraderError,
+    OrderResultUnknownError,
+)
 from moomoo_trader.gateway import MoomooGateway
 
 
@@ -11,6 +16,9 @@ class FakeTradeContext:
         self.acctradinginfo_kwargs = None
         self.modify_order_kwargs = None
         self.order_fee_query_kwargs = None
+
+    def position_list_query(self, **kwargs):
+        return -1, "This data is not ready yet"
 
     def place_order(self, **kwargs):
         self.place_order_kwargs = kwargs
@@ -113,14 +121,14 @@ class GatewayTest(unittest.TestCase):
                 remark="remark",
                 session_name="ETH",
                 jp_acc_type_name="JP_GENERAL_SHORT",
-                position_id="p-1",
+                position_id=98765,
             )
 
         self.assertEqual("US.AAPL", self.gateway.trade_context.place_order_kwargs["code"])
         self.assertEqual("MARKET", self.gateway.trade_context.place_order_kwargs["order_type"])
         self.assertEqual("GTC", self.gateway.trade_context.place_order_kwargs["time_in_force"])
         self.assertEqual("ETH", self.gateway.trade_context.place_order_kwargs["session"])
-        self.assertEqual("p-1", self.gateway.trade_context.place_order_kwargs["position_id"])
+        self.assertEqual(98765, self.gateway.trade_context.place_order_kwargs["position_id"])
         self.assertEqual("1", order.order_id)
 
     def test_query_max_trade_qtysを正規化する(self):
@@ -189,6 +197,137 @@ class GatewayTest(unittest.TestCase):
         self.assertIsNone(gateway.account_id)
         self.assertEqual("456", account["acc_id"])
         self.assertEqual(456, gateway._resolved_acc_id())
+
+    def test_position_idが文字列なら拒否する(self):
+        with self.assertRaises(MoomooTraderError):
+            self.gateway.query_max_trade_qtys(
+                full_code="US.AAPL",
+                order_type_name="NORMAL",
+                price=123.4,
+                session_name=None,
+                jp_acc_type_name="JP_GENERAL",
+                position_id="p-1",
+            )
+
+    def test_データ未準備は空配列ではなくエラーにする(self):
+        with self.assertRaises(DataNotReadyError):
+            self.gateway.query_positions()
+
+    def test_発注の通信例外は結果不明として扱う(self):
+        def broken_place_order(**kwargs):
+            raise ConnectionError("connection reset")
+
+        with patch.object(self.gateway.trade_context, "place_order", broken_place_order):
+            with self.assertRaises(OrderResultUnknownError):
+                self.gateway.place_order(
+                    full_code="US.AAPL",
+                    side="BUY",
+                    order_type_name="NORMAL",
+                    time_in_force_name="DAY",
+                    qty=1,
+                    price=100,
+                    remark="remark",
+                    session_name=None,
+                    jp_acc_type_name="JP_GENERAL",
+                )
+
+    def test_発注の切断応答は結果不明として扱う(self):
+        with patch.object(
+            self.gateway.trade_context,
+            "place_order",
+            return_value=(-1, "Disconnect"),
+        ):
+            with self.assertRaises(OrderResultUnknownError):
+                self.gateway.place_order(
+                    full_code="US.AAPL",
+                    side="BUY",
+                    order_type_name="NORMAL",
+                    time_in_force_name="DAY",
+                    qty=1,
+                    price=100,
+                    remark="remark",
+                    session_name=None,
+                    jp_acc_type_name="JP_GENERAL",
+                )
+
+    def test_発注応答の解析エラーは結果不明として扱う(self):
+        with patch.object(
+            self.gateway.trade_context,
+            "place_order",
+            return_value=(-1, "invalid literal for int() with base 10: 'x'"),
+        ):
+            with self.assertRaises(OrderResultUnknownError):
+                self.gateway.place_order(
+                    full_code="US.AAPL",
+                    side="BUY",
+                    order_type_name="NORMAL",
+                    time_in_force_name="DAY",
+                    qty=1,
+                    price=100,
+                    remark="remark",
+                    session_name=None,
+                    jp_acc_type_name="JP_GENERAL",
+                )
+
+    def test_同じ環境の別口座の実ヘッダー通知を捨てる(self):
+        other_account = _push_response(acc_id=999, trd_env="REAL")
+        own_account = _push_response(acc_id=123, trd_env="REAL")
+
+        self.assertFalse(self.gateway._accept_push_record(other_account, {}))
+        self.assertTrue(self.gateway._accept_push_record(own_account, {}))
+
+    def test_別環境の実ヘッダー通知を捨てる(self):
+        response = _push_response(acc_id=123, trd_env="SIMULATE")
+
+        self.assertFalse(self.gateway._accept_push_record(response, {}))
+
+    def test_通知ヘッダーの口座IDをイベントへ引き継ぐ(self):
+        response = _push_response(acc_id=123, trd_env="REAL")
+
+        account = self.gateway._resolve_push_account(response, {})
+
+        assert account is not None
+        self.assertEqual(123, int(str(account["acc_id"])))
+        self.assertEqual("REAL", str(account["trd_env"]).upper())
+
+    def test_口座を特定できない通知は捨てる(self):
+        self.assertFalse(self.gateway._accept_push_record(_PushMessage([]), {}))
+
+    def test_レコード側の別口座を捨てる(self):
+        self.assertFalse(self.gateway._accept_push_record(_PushMessage([]), {"acc_id": 999}))
+        self.assertFalse(
+            self.gateway._accept_push_record(
+                _PushMessage([]),
+                {"acc_id": 123, "trd_env": "SIMULATE"},
+            )
+        )
+        self.assertTrue(
+            self.gateway._accept_push_record(
+                _PushMessage([]),
+                {"acc_id": 123, "trd_env": "REAL"},
+            )
+        )
+
+
+def _push_response(*, acc_id, trd_env):
+    header = _PushMessage([(_PushField("accID"), acc_id), (_PushField("trdEnv"), trd_env)])
+    s2c = _PushMessage([(_PushField("header"), header)])
+    return _PushMessage([(_PushField("s2c"), s2c)])
+
+
+class _PushField:
+    def __init__(self, name):
+        self.name = name
+
+
+class _PushMessage:
+    def __init__(self, fields=(), **attributes):
+        self._fields = list(fields)
+        for key, value in attributes.items():
+            setattr(self, key, value)
+
+    def ListFields(self):
+        return self._fields
 
 
 if __name__ == "__main__":

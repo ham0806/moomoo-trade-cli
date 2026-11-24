@@ -9,6 +9,10 @@ max_daily_orders = 5
 max_daily_notional = 100000
 max_open_orders_per_symbol = 1
 cancel_after_seconds = 300
+# 成行注文の予算評価に上乗せするスリッページ余裕（0.05 = 5%）
+market_order_slippage_ratio = 0.05
+# 成行注文で許容する行情の最大経過秒数（0 で無効）
+max_quote_age_seconds = 300
 
 [[symbols]]
 code = "AAPL"

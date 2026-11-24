@@ -7,6 +7,12 @@ from typing import Any, Dict, List, Optional
 from .accounts import list_accounts, select_account
 from .balance import build_balance_snapshot, fetch_balance
 from .config import OpenDConfig
+from .errors import (
+    ApiCallError,
+    DataNotReadyError,
+    MoomooTraderError,
+    OrderResultUnknownError,
+)
 from .json_utils import frame_to_records, sanitize_for_json
 from .models import MaxTradeQtySnapshot
 from .orders import build_order_entry, normalize_order_record
@@ -19,6 +25,7 @@ from .sdk import (
     get_sdk_module,
     get_trade_handler_bases,
     normalize_enum_label,
+    normalize_trd_env_label,
     parse_jp_acc_type,
     parse_modify_order_op,
     parse_order_type,
@@ -27,7 +34,7 @@ from .sdk import (
     parse_trd_env,
     parse_trd_side,
 )
-from .time_utils import to_iso, today_text
+from .time_utils import to_iso, to_market_iso, today_text
 
 
 class MoomooGateway:
@@ -47,6 +54,8 @@ class MoomooGateway:
         self.quote_context: Any = None
         self.sdk: Any = get_sdk_module()
         self.sdk_trd_env = parse_trd_env(self.env_name)
+        # 約定履歴 API が使えない環境（simulate など）では False になる。
+        self.deal_history_available = True
 
     def connect(self) -> None:
         if self.trade_context is not None and self.quote_context is not None:
@@ -144,7 +153,7 @@ class MoomooGateway:
             asset_category=self.sdk.AssetCategory.NONE,
         )
         if _is_data_not_ready(ret, data):
-            return []
+            raise DataNotReadyError("ポジション一覧がまだ準備できていません。")
         ensure_ret_ok(ret, data, "ポジション一覧取得")
         return [
             build_position_snapshot(normalize_position_record(record))
@@ -160,36 +169,48 @@ class MoomooGateway:
             order_market=self.sdk.TrdMarket.NONE,
         )
         if _is_data_not_ready(ret, data):
-            return []
+            raise DataNotReadyError("注文一覧がまだ準備できていません。")
         ensure_ret_ok(ret, data, "注文一覧取得")
         return [
             build_order_entry(normalize_order_record(record)) for record in frame_to_records(data)
         ]
 
-    def query_today_orders(self, now: Optional[datetime] = None):
+    def query_today_orders(
+        self,
+        now: Optional[datetime] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ):
         self.connect()
-        target_date = today_text(now)
+        target_start = start_date or today_text(now)
+        target_end = end_date or target_start
         ret, data = self.trade_context.history_order_list_query(
-            start=target_date,
-            end=target_date,
+            start=target_start,
+            end=target_end,
             trd_env=self.sdk_trd_env,
             acc_id=self._resolved_acc_id(),
             order_market=self.sdk.TrdMarket.NONE,
         )
         if _is_data_not_ready(ret, data):
-            return []
+            raise DataNotReadyError("当日注文履歴がまだ準備できていません。")
         ensure_ret_ok(ret, data, "当日注文履歴取得")
         return [
             build_order_entry(normalize_order_record(record)) for record in frame_to_records(data)
         ]
 
-    def query_today_deals(self, now: Optional[datetime] = None):
-        target_date = today_text(now)
+    def query_today_deals(
+        self,
+        now: Optional[datetime] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ):
+        target_start = start_date or today_text(now)
+        target_end = end_date or target_start
         return [
             self._build_deal_entry(record)
             for record in self.query_deal_records(
-                start_date=target_date,
-                end_date=target_date,
+                start_date=target_start,
+                end_date=target_end,
             )
         ]
 
@@ -209,7 +230,10 @@ class MoomooGateway:
             acc_id=self._resolved_acc_id(),
             deal_market=self.sdk.TrdMarket.NONE,
         )
-        if _is_data_not_ready(ret, data) or _is_deal_list_unsupported(ret, data):
+        if _is_data_not_ready(ret, data):
+            raise DataNotReadyError("約定履歴がまだ準備できていません。")
+        if _is_deal_list_unsupported(ret, data):
+            self.deal_history_available = False
             return []
         ensure_ret_ok(ret, data, "当日約定履歴取得")
         return [self._normalize_deal_record(record) for record in frame_to_records(data)]
@@ -236,7 +260,7 @@ class MoomooGateway:
         price: float,
         session_name: Optional[str],
         jp_acc_type_name: str,
-        position_id: Optional[str] = None,
+        position_id: Optional[int] = None,
     ) -> MaxTradeQtySnapshot:
         self.connect()
         ret, data = self.trade_context.acctradinginfo_query(
@@ -247,7 +271,7 @@ class MoomooGateway:
             acc_id=self._resolved_acc_id(),
             session=parse_session(session_name or ""),
             jp_acc_type=parse_jp_acc_type(jp_acc_type_name),
-            position_id=position_id,
+            position_id=_validate_position_id(position_id),
         )
         ensure_ret_ok(ret, data, "最大取引数量取得")
         record = frame_to_records(data)[0]
@@ -265,26 +289,52 @@ class MoomooGateway:
         remark: str,
         session_name: Optional[str],
         jp_acc_type_name: str,
-        position_id: Optional[str] = None,
+        position_id: Optional[int] = None,
     ):
         self.connect()
-        ret, data = self.trade_context.place_order(
-            price=price,
-            qty=qty,
-            code=full_code,
-            trd_side=parse_trd_side(side),
-            order_type=parse_order_type(order_type_name),
-            time_in_force=parse_time_in_force(time_in_force_name),
-            trd_env=self.sdk_trd_env,
-            acc_id=self._resolved_acc_id(),
-            remark=remark,
-            session=parse_session(session_name or ""),
-            jp_acc_type=parse_jp_acc_type(jp_acc_type_name),
-            position_id=position_id,
-        )
-        ensure_ret_ok(ret, data, "注文発行")
-        record = frame_to_records(data)[0]
-        return build_order_entry(normalize_order_record(record))
+        try:
+            ret, data = self.trade_context.place_order(
+                price=price,
+                qty=qty,
+                code=full_code,
+                trd_side=parse_trd_side(side),
+                order_type=parse_order_type(order_type_name),
+                time_in_force=parse_time_in_force(time_in_force_name),
+                trd_env=self.sdk_trd_env,
+                acc_id=self._resolved_acc_id(),
+                remark=remark,
+                session=parse_session(session_name or ""),
+                jp_acc_type=parse_jp_acc_type(jp_acc_type_name),
+                position_id=_validate_position_id(position_id),
+            )
+        except MoomooTraderError:
+            raise
+        except Exception as exc:
+            # 通信断・タイムアウトなどは受理済みの可能性があるため「結果不明」として扱う。
+            raise OrderResultUnknownError(
+                "注文発行の結果を確認できません。証券側の状態を照合するまで再発注しません。"
+            ) from exc
+
+        if ret != 0:
+            # 未受理を確認できる情報がないため、結果不明として予約を維持する。
+            try:
+                ensure_ret_ok(ret, data, "注文発行")
+            except ApiCallError as exc:
+                raise OrderResultUnknownError(
+                    "注文発行の結果を確認できません（{0}）。"
+                    "証券側の状態を照合するまで再発注しません。".format(exc)
+                ) from exc
+            raise OrderResultUnknownError(
+                "注文発行の結果を確認できません。証券側の状態を照合するまで再発注しません。"
+            )
+
+        try:
+            record = frame_to_records(data)[0]
+            return build_order_entry(normalize_order_record(record))
+        except Exception as exc:
+            raise OrderResultUnknownError(
+                "注文は送信されましたが結果を解釈できません。証券側の状態を照合するまで再発注しません。"
+            ) from exc
 
     def modify_order(
         self,
@@ -334,16 +384,21 @@ class MoomooGateway:
         order_handler_base, deal_handler_base = get_trade_handler_bases()
         event_queue = self.event_queue
         sdk = self.sdk
+        gateway = self
 
         class OrderPushHandler(order_handler_base):  # type: ignore[misc, valid-type]
             def on_recv_rsp(self, rsp_pb):
                 ret, content = super(OrderPushHandler, self).on_recv_rsp(rsp_pb)
                 if ret == sdk.RET_OK:
                     for record in frame_to_records(content):
+                        account = gateway._resolve_push_account(rsp_pb, record)
+                        if account is None:
+                            continue
                         event_queue.put(
                             {
                                 "type": "order",
                                 "payload": normalize_order_record(record),
+                                "account": account,
                             }
                         )
                 return ret, content
@@ -353,16 +408,68 @@ class MoomooGateway:
                 ret, content = super(DealPushHandler, self).on_recv_rsp(rsp_pb)
                 if ret == sdk.RET_OK:
                     for record in frame_to_records(content):
+                        account = gateway._resolve_push_account(rsp_pb, record)
+                        if account is None:
+                            continue
                         event_queue.put(
                             {
                                 "type": "deal",
                                 "payload": MoomooGateway._normalize_deal_record(record),
+                                "account": account,
                             }
                         )
                 return ret, content
 
         self.trade_context.set_handler(OrderPushHandler())
         self.trade_context.set_handler(DealPushHandler())
+
+    def _resolve_push_account(
+        self, rsp_pb: Any, record: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """通知の口座識別情報を返す。対象外の通知なら None。
+
+        実 SDK の protobuf はヘッダーのフィールド名が `accID` / `trdEnv` で、
+        通知 DataFrame には口座 ID が含まれない。ヘッダーを優先して検証し、
+        正規化した識別情報をイベントへ引き継ぐ。
+        """
+        header = _extract_push_identity(rsp_pb)
+        record_identity = _record_identity(record)
+        if not header and not record_identity:
+            # 口座を特定できない通知は、他口座の約定を混入させないため捨てる。
+            return None
+        for identity in (header, record_identity):
+            if identity and not self._matches_account(
+                identity.get("acc_id"), identity.get("trd_env")
+            ):
+                return None
+
+        merged: Dict[str, Any] = {}
+        merged.update(record_identity)
+        merged.update(header)
+        return merged
+
+    def _accept_push_record(self, rsp_pb: Any, record: Dict[str, Any]) -> bool:
+        return self._resolve_push_account(rsp_pb, record) is not None
+
+    def _matches_account(self, acc_id: Any, trd_env: Any) -> bool:
+        env_label = normalize_trd_env_label(trd_env) if trd_env is not None else ""
+        if env_label in {"N/A", "NONE"}:
+            env_label = ""
+        if env_label in {"REAL", "SIMULATE"}:
+            if env_label != self.env_name.upper():
+                return False
+        elif env_label:
+            # 未知の環境表記は対象口座の通知と断定できないため捨てる。
+            return False
+
+        expected = _coerce_account_id(acc_id)
+        if expected is None:
+            return True
+
+        try:
+            return expected == self._resolved_acc_id()
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     def _normalize_deal_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -379,7 +486,7 @@ class MoomooGateway:
                 "trd_env": normalize_enum_label(record.get("trd_env")),
                 "trd_side": normalize_enum_label(record.get("trd_side")),
                 "status": normalize_enum_label(record.get("status")),
-                "create_time": to_iso(record.get("create_time")),
+                "create_time": to_market_iso(record.get("create_time"), market),
             }
         )
         return normalized
@@ -428,6 +535,113 @@ def _split_full_code(full_code: str) -> tuple:
         return "", full_code
     market, code = full_code.split(".", 1)
     return market, code
+
+
+def _extract_push_identity(message: Any) -> Dict[str, Any]:
+    """生の通知メッセージから口座 ID と取引環境を探す。
+
+    実 SDK の protobuf は `s2c.header` に `accID` / `trdEnv` を持つ。
+    フィールド名の表記揺れ（snake_case）も吸収する。
+    """
+    header = _nested_attr(_nested_attr(message, "s2c"), "header")
+    found = _read_identity_fields(header)
+    if found:
+        return found
+
+    found = _find_push_fields(message, 0)
+    if "acc_id" in found or "trd_env" in found:
+        return found
+    return {}
+
+
+def _find_push_fields(message: Any, depth: int) -> Dict[str, Any]:
+    if depth > 3 or not hasattr(message, "ListFields"):
+        return {}
+
+    found = _read_identity_fields(message)
+    if "acc_id" in found and "trd_env" in found:
+        return found
+
+    try:
+        fields = message.ListFields()
+    except Exception:  # pragma: no cover - 実 SDK の protobuf 差分吸収用
+        return found
+
+    for descriptor, value in fields:
+        if isinstance(value, (list, tuple)):
+            continue
+        for key, nested in _find_push_fields(value, depth + 1).items():
+            found.setdefault(key, nested)
+    return found
+
+
+def _read_identity_fields(message: Any) -> Dict[str, Any]:
+    if message is None or not hasattr(message, "ListFields"):
+        return {}
+
+    try:
+        fields = message.ListFields()
+    except Exception:  # pragma: no cover - 実 SDK の protobuf 差分吸収用
+        return {}
+
+    found: Dict[str, Any] = {}
+    for descriptor, value in fields:
+        name = _normalized_field_name(getattr(descriptor, "name", ""))
+        if name == "accid":
+            found["acc_id"] = value
+        elif name == "trdenv":
+            found["trd_env"] = value
+    return found
+
+
+def _normalized_field_name(name: Any) -> str:
+    return str(name).replace("_", "").lower()
+
+
+def _nested_attr(message: Any, name: str) -> Any:
+    if message is None:
+        return None
+    return getattr(message, name, None)
+
+
+def _record_identity(record: Dict[str, Any]) -> Dict[str, Any]:
+    identity: Dict[str, Any] = {}
+    for key in ("acc_id", "trd_env"):
+        value = record.get(key)
+        if value is not None and str(value).strip().upper() not in {"", "N/A", "NONE", "NULL"}:
+            identity[key] = value
+    return identity
+
+
+def _coerce_account_id(value: Any) -> Optional[int]:
+    """口座 ID は浮動小数点を経由せず整数で比較する。"""
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text or text.upper() in {"N/A", "NONE", "NULL", "0"}:
+        return None
+
+    try:
+        return int(text)
+    except ValueError:
+        pass
+
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if not number.is_integer():
+        return None
+    return int(number)
+
+
+def _validate_position_id(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MoomooTraderError("position_id は整数で指定してください。")
+    return value
 
 
 def _optional_float(value: Any) -> Optional[float]:

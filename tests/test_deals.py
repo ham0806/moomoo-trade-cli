@@ -58,6 +58,60 @@ class FetchDealsTest(unittest.TestCase):
         assert gateway is not None
         self.assertEqual("123", gateway.account_id)
 
+    def test_シンボル指定時は市場の日付を既定にする(self):
+        with patch("moomoo_trader.deals.MoomooGateway", FakeGateway), patch(
+            "moomoo_trader.deals.market_today_text",
+            return_value="2026-01-14",
+        ):
+            fetch_deals(
+                config=OpenDConfig(host="127.0.0.1", port=11111),
+                env_name="real",
+                account_id="123",
+                symbol="US.AAPL",
+            )
+
+        gateway = FakeGateway.last_instance
+        assert gateway is not None
+        self.assertEqual("2026-01-14", gateway.deal_queries[0]["start_date"])
+        self.assertEqual("2026-01-14", gateway.deal_queries[0]["end_date"])
+
+    def test_開始日のみ指定時は終了日を当日にする(self):
+        with patch("moomoo_trader.deals.MoomooGateway", FakeGateway), patch(
+            "moomoo_trader.deals.market_today_text",
+            return_value="2026-11-11",
+        ):
+            fetch_deals(
+                config=OpenDConfig(host="127.0.0.1", port=11111),
+                env_name="real",
+                account_id="123",
+                symbol="US.AAPL",
+                start="2026-11-01",
+            )
+
+        gateway = FakeGateway.last_instance
+        assert gateway is not None
+        self.assertEqual("2026-11-01", gateway.deal_queries[0]["start_date"])
+        self.assertEqual("2026-11-11", gateway.deal_queries[0]["end_date"])
+
+    def test_開始日と終了日を指定した場合はそのまま使う(self):
+        with patch("moomoo_trader.deals.MoomooGateway", FakeGateway), patch(
+            "moomoo_trader.deals.market_today_text",
+            return_value="2026-11-11",
+        ):
+            fetch_deals(
+                config=OpenDConfig(host="127.0.0.1", port=11111),
+                env_name="real",
+                account_id="123",
+                symbol="US.AAPL",
+                start="2026-11-01",
+                end="2026-11-05",
+            )
+
+        gateway = FakeGateway.last_instance
+        assert gateway is not None
+        self.assertEqual("2026-11-01", gateway.deal_queries[0]["start_date"])
+        self.assertEqual("2026-11-05", gateway.deal_queries[0]["end_date"])
+
 
 if __name__ == "__main__":
     unittest.main()

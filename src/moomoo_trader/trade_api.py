@@ -48,7 +48,7 @@ def place_order(
             remark=remark or "",
             session_name=session,
             jp_acc_type_name=resolved_jp_acc_type,
-            position_id=position_id,
+            position_id=_parse_position_id(position_id),
         )
         return serialize_order_entry(order)
     finally:
@@ -113,7 +113,7 @@ def query_max_trade_qtys(
             price=price,
             session_name=session,
             jp_acc_type_name=resolved_jp_acc_type,
-            position_id=position_id,
+            position_id=_parse_position_id(position_id),
         )
         return serialize_max_trade_qtys(snapshot, resolved_jp_acc_type)
     finally:
@@ -170,3 +170,21 @@ def _normalize_symbol(symbol: str) -> str:
             "`--symbol` には `JP.7203` のような市場付きコードを指定してください。"
         )
     return normalized
+
+
+def _parse_position_id(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise MoomooTraderError("`--position-id` には整数を指定してください。")
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        return int(text)
+    except ValueError as exc:
+        raise MoomooTraderError(
+            "`--position-id` には整数を指定してください: {}".format(value)
+        ) from exc

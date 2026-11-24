@@ -59,7 +59,7 @@ def _build_position(**overrides) -> PositionSnapshot:
         "qty": 20.0,
         "can_sell_qty": 20.0,
         "position_side": "LONG",
-        "position_id": "p-1",
+        "position_id": 1,
         "cost_price": 1000.0,
         "market_val": 20000.0,
         "pl_val": 0.0,
@@ -280,7 +280,7 @@ class RiskManagerTest(unittest.TestCase):
                     qty=10.0,
                     can_sell_qty=0.0,
                     position_side="SHORT",
-                    position_id="short-1",
+                    position_id=2,
                 )
             },
             open_orders=[],
@@ -295,6 +295,222 @@ class RiskManagerTest(unittest.TestCase):
         )
 
         self.assertTrue(decision.accepted)
+
+    def test_日次上限に達しても損切り売りは許可する(self):
+        manager = self._build_manager()
+        intent = TradeIntent(
+            code="7203",
+            market="JP",
+            side="SELL",
+            qty=10,
+            limit_price=1000,
+            strategy_id="test",
+        )
+        portfolio = PortfolioState(
+            balance=None,
+            positions={self.symbol.full_code: _build_position(qty=20.0, can_sell_qty=20.0)},
+            open_orders=[],
+        )
+
+        decision = manager.evaluate(
+            intent,
+            portfolio,
+            _build_qtys(max_position_sell=20.0),
+            daily_order_count=self.risk_limits.max_daily_orders,
+            daily_notional=self.risk_limits.max_daily_notional,
+        )
+
+        self.assertTrue(decision.accepted)
+
+    def test_未完了注文枠が埋まっていても損切り売りは許可する(self):
+        manager = self._build_manager()
+        intent = TradeIntent(
+            code="7203",
+            market="JP",
+            side="SELL",
+            qty=10,
+            limit_price=1000,
+            strategy_id="test",
+        )
+        portfolio = PortfolioState(
+            balance=None,
+            positions={self.symbol.full_code: _build_position(qty=20.0, can_sell_qty=20.0)},
+            open_orders=[_build_order()],
+        )
+
+        decision = manager.evaluate(
+            intent,
+            portfolio,
+            _build_qtys(max_position_sell=20.0),
+            daily_order_count=0,
+            daily_notional=0.0,
+        )
+
+        self.assertTrue(decision.accepted)
+
+    def test_日次上限に達したら新規買いは拒否する(self):
+        manager = self._build_manager()
+        intent = TradeIntent(
+            code="7203",
+            market="JP",
+            side="BUY",
+            qty=10,
+            limit_price=1000,
+            strategy_id="test",
+        )
+
+        decision = manager.evaluate(
+            intent,
+            PortfolioState(balance=None, positions={}, open_orders=[]),
+            _build_qtys(),
+            daily_order_count=self.risk_limits.max_daily_orders,
+            daily_notional=0.0,
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertIn("当日注文数", decision.reason)
+
+    def test_未約定の買い数量を保有上限に含める(self):
+        manager = self._build_manager()
+        intent = TradeIntent(
+            code="7203",
+            market="JP",
+            side="BUY",
+            qty=50,
+            limit_price=1000,
+            strategy_id="test",
+        )
+
+        decision = manager.evaluate(
+            intent,
+            PortfolioState(balance=None, positions={}, open_orders=[]),
+            _build_qtys(),
+            daily_order_count=0,
+            daily_notional=0.0,
+            pending_qtys={("JP.7203", "BUY"): 60.0},
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertIn("保有上限", decision.reason)
+
+    def test_未約定の売り数量を売却可能数量から差し引く(self):
+        manager = self._build_manager()
+        intent = TradeIntent(
+            code="7203",
+            market="JP",
+            side="SELL",
+            qty=10,
+            limit_price=1000,
+            strategy_id="test",
+        )
+        portfolio = PortfolioState(
+            balance=None,
+            positions={self.symbol.full_code: _build_position(can_sell_qty=20.0)},
+            open_orders=[],
+        )
+
+        decision = manager.evaluate(
+            intent,
+            portfolio,
+            _build_qtys(max_position_sell=20.0),
+            daily_order_count=0,
+            daily_notional=0.0,
+            pending_qtys={("JP.7203", "SELL"): 15.0},
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertIn("売却可能数量", decision.reason)
+
+    def test_成行注文は指定価格ではなく保守的な基準価格で予算判定する(self):
+        manager = self._build_manager()
+        intent = TradeIntent(
+            code="7203",
+            market="JP",
+            side="BUY",
+            qty=100,
+            limit_price=1,
+            strategy_id="test",
+            order_type="MARKET",
+        )
+
+        decision = manager.evaluate(
+            intent,
+            PortfolioState(balance=None, positions={}, open_orders=[]),
+            _build_qtys(),
+            daily_order_count=0,
+            daily_notional=0.0,
+            effective_price=1050.0,
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertIn("当日想定約定代金", decision.reason)
+
+    def test_成行注文の基準価格がなければ拒否する(self):
+        manager = self._build_manager()
+        intent = TradeIntent(
+            code="7203",
+            market="JP",
+            side="BUY",
+            qty=10,
+            limit_price=1,
+            strategy_id="test",
+            order_type="MARKET",
+        )
+
+        decision = manager.evaluate(
+            intent,
+            PortfolioState(balance=None, positions={}, open_orders=[]),
+            _build_qtys(),
+            daily_order_count=0,
+            daily_notional=0.0,
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertIn("基準価格", decision.reason)
+
+    def test_NaNの数量は拒否する(self):
+        manager = self._build_manager()
+        intent = TradeIntent(
+            code="7203",
+            market="JP",
+            side="BUY",
+            qty=float("nan"),
+            limit_price=1000,
+            strategy_id="test",
+        )
+
+        decision = manager.evaluate(
+            intent,
+            PortfolioState(balance=None, positions={}, open_orders=[]),
+            _build_qtys(),
+            daily_order_count=0,
+            daily_notional=0.0,
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertIn("数量と価格", decision.reason)
+
+    def test_NaNの最大取引数量は0として扱う(self):
+        manager = self._build_manager()
+        intent = TradeIntent(
+            code="7203",
+            market="JP",
+            side="BUY",
+            qty=10,
+            limit_price=1000,
+            strategy_id="test",
+        )
+
+        decision = manager.evaluate(
+            intent,
+            PortfolioState(balance=None, positions={}, open_orders=[]),
+            _build_qtys(max_cash_buy=float("nan")),
+            daily_order_count=0,
+            daily_notional=0.0,
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertIn("最大買付可能数量", decision.reason)
 
 
 if __name__ == "__main__":

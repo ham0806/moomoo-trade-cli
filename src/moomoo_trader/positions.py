@@ -12,7 +12,7 @@ from .sdk import (
     normalize_enum_label,
     parse_trd_env,
 )
-from .time_utils import to_iso
+from .time_utils import to_market_iso
 
 
 def fetch_positions(
@@ -50,8 +50,8 @@ def normalize_position_record(record: Dict[str, Any]) -> Dict[str, Any]:
             "market": market,
             "full_code": full_code,
             "trd_env": normalize_enum_label(record.get("trd_env")),
-            "create_time": to_iso(record.get("create_time")),
-            "update_time": to_iso(record.get("update_time")),
+            "create_time": to_market_iso(record.get("create_time"), market),
+            "update_time": to_market_iso(record.get("update_time"), market),
         }
     )
     return normalized
@@ -67,7 +67,7 @@ def build_position_snapshot(record: Dict[str, Any]):
         qty=float(record.get("qty") or record.get("stock_qty") or 0.0),
         can_sell_qty=float(record.get("can_sell_qty") or 0.0),
         position_side=_normalize_position_side(record.get("position_side")),
-        position_id=_optional_text(record.get("position_id")),
+        position_id=_optional_int(record.get("position_id")),
         cost_price=_optional_float(record.get("cost_price")),
         market_val=_optional_float(record.get("market_val")),
         pl_val=_optional_float(record.get("pl_val")),
@@ -105,6 +105,30 @@ def _optional_text(value: Any) -> Optional[str]:
         return None
     text = str(value)
     return text if text else None
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    """SDK の position_id は整数。文字列のまま渡すと発注が失敗するため境界で変換する。"""
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text or text.upper() in {"N/A", "NONE", "NULL"}:
+        return None
+
+    try:
+        return int(text)
+    except ValueError:
+        pass
+
+    try:
+        number = float(text)
+    except ValueError as exc:
+        raise ValueError("position_id が整数ではありません: {}".format(value)) from exc
+
+    if not number.is_integer():
+        raise ValueError("position_id が整数ではありません: {}".format(value))
+    return int(number)
 
 
 def _normalize_position_side(value: Any) -> str:

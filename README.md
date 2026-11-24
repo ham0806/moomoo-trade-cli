@@ -150,7 +150,11 @@ Copy-Item .\trading.example.toml .\trading.toml
 - `credential_name`
   - Windows 資格情報ストアに保存した取引暗証番号の論理名
 - `risk_limits`
-  - 注文数、想定約定代金、未完了注文数、失効注文の自動キャンセル秒数
+  - 注文数、想定約定代金、未完了注文数、失効注文の自動キャンセル秒数。成行注文の予算評価に使う `market_order_slippage_ratio` と行情の許容経過秒数 `max_quote_age_seconds` も任意で指定できます
+- `state_sync_interval_seconds`
+  - 任意。口座状態を再照会する間隔（既定 30 秒）。古い状態のまま発注しないために使います
+- `state_dir`
+  - 任意。発注意図の予約ファイルを置くディレクトリ。省略時は `%LOCALAPPDATA%\moomoo-trade-cli` を使います
 - `symbols`
   - 監視対象の銘柄群。`code`, `market`, `max_position_qty`, `max_order_qty`, `allowed_sides`, `allowed_order_types`, `allowed_time_in_force`, `allowed_sessions` を指定
 

@@ -5,6 +5,32 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+_REMARK_PREFIX = "moomoo-trade-cli"
+_STRATEGY_TOKEN_BYTES = 14
+
+
+def strategy_token(strategy_id: str) -> str:
+    """戦略IDから作る固定長の所有識別子。
+
+    備考の切り詰めで別戦略と前方一致することを避けるため、完全な戦略IDを
+    ハッシュ化した固定長トークンを使う。
+    """
+    return hashlib.sha256(str(strategy_id).strip().encode("utf-8")).hexdigest()[
+        :_STRATEGY_TOKEN_BYTES
+    ]
+
+
+def build_order_remark(strategy_id: str, intent_signature: str) -> str:
+    """注文備考を SDK の上限（64 バイト）以内に収める。
+
+    intent= は重複判定に使い、strategy= は所有判定に使う固定長トークンにする。
+    """
+    return "{}|strategy={}|intent={}".format(
+        _REMARK_PREFIX,
+        strategy_token(strategy_id),
+        str(intent_signature),
+    )
+
 
 def build_intent_signature(
     strategy_id: str,
@@ -66,10 +92,7 @@ class TradeIntent:
 
     @property
     def remark(self) -> str:
-        return "moomoo-trade-cli|strategy={}|intent={}".format(
-            self.strategy_id,
-            self.intent_signature,
-        )
+        return build_order_remark(self.strategy_id, self.intent_signature)
 
 
 @dataclass(frozen=True)
@@ -105,7 +128,7 @@ class PositionSnapshot:
     qty: float
     can_sell_qty: float
     position_side: str
-    position_id: Optional[str]
+    position_id: Optional[int]
     cost_price: Optional[float]
     market_val: Optional[float]
     pl_val: Optional[float]
@@ -133,9 +156,12 @@ class OrderLedgerEntry:
     currency: Optional[str]
     session: Optional[str]
     raw: Dict[str, Any]
+    # 約定通知をポジション台帳へ反映済みの数量。通知順序の差で保有上限を超えないために使う。
+    applied_dealt_qty: float = 0.0
 
     @property
     def is_open(self) -> bool:
+        # TIMEOUT は証券側の結果が確定していないため、未完了として扱い再発注を止める。
         return self.status in {
             "SUBMITTING",
             "WAITING_SUBMIT",
@@ -143,7 +169,22 @@ class OrderLedgerEntry:
             "FILLED_PART",
             "CANCELLING_PART",
             "CANCELLING_ALL",
+            "TIMEOUT",
         }
+
+    @property
+    def unapplied_dealt_qty(self) -> float:
+        """約定したがポジション台帳へまだ反映していない数量。"""
+        return max(0.0, float(self.dealt_qty) - float(self.applied_dealt_qty))
+
+    @property
+    def pending_qty(self) -> float:
+        """まだポジション台帳に反映されていない数量。
+
+        未約定残数量に加え、約定通知だけ先行して届き台帳へ未反映の数量も含める。
+        """
+        remaining = max(0.0, float(self.qty) - float(self.dealt_qty))
+        return remaining + self.unapplied_dealt_qty
 
     @property
     def intent_signature(self) -> Optional[str]:

@@ -12,7 +12,7 @@ from .sdk import (
     normalize_enum_label,
     parse_trd_env,
 )
-from .time_utils import parse_timestamp, to_iso
+from .time_utils import to_iso, to_market_aware, to_market_iso
 
 
 def fetch_orders(
@@ -56,8 +56,9 @@ def normalize_order_record(record: Dict[str, Any]) -> Dict[str, Any]:
             "order_type": normalize_enum_label(record.get("order_type")),
             "time_in_force": normalize_enum_label(record.get("time_in_force")),
             "session": normalize_enum_label(record.get("session")),
-            "create_time": to_iso(record.get("create_time")),
-            "updated_time": to_iso(record.get("updated_time")),
+            # 取引 API の時刻は取引所の現地時刻なので、市場を指定して UTC に正規化する。
+            "create_time": to_market_iso(record.get("create_time"), market),
+            "updated_time": to_market_iso(record.get("updated_time"), market),
         }
     )
     return normalized
@@ -79,8 +80,8 @@ def build_order_entry(record: Dict[str, Any]):
         status=str(record.get("order_status") or ""),
         order_type=_optional_text(record.get("order_type")),
         time_in_force=_optional_text(record.get("time_in_force")),
-        create_time=parse_timestamp(record.get("create_time")),
-        updated_time=parse_timestamp(record.get("updated_time")),
+        create_time=to_market_aware(record.get("create_time"), _market_of(record)),
+        updated_time=to_market_aware(record.get("updated_time"), _market_of(record)),
         remark=_optional_text(record.get("remark")),
         currency=_optional_text(record.get("currency")),
         session=_optional_text(record.get("session")),
@@ -124,6 +125,13 @@ def _split_full_code(full_code: str) -> tuple:
         return "", full_code
     market, code = full_code.split(".", 1)
     return market, code
+
+
+def _market_of(record: Dict[str, Any]) -> str:
+    market = str(record.get("market") or "").strip()
+    if market:
+        return market
+    return _split_full_code(str(record.get("full_code") or record.get("code") or "").upper())[0]
 
 
 def _optional_float(value: Any) -> Optional[float]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -38,6 +39,10 @@ class RiskLimits:
     max_daily_notional: float
     max_open_orders_per_symbol: int
     cancel_after_seconds: int
+    # 成行注文の予算評価に上乗せするスリッページ余裕。
+    market_order_slippage_ratio: float = 0.05
+    # 成行注文で許容する行情の最大経過秒数。0 以下なら検証しない。
+    max_quote_age_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,10 @@ class TradingConfig:
     credential_name: Optional[str]
     risk_limits: RiskLimits
     strategy_options: Dict[str, Any] = field(default_factory=dict)
+    # 口座状態を再照会する間隔。未指定時は既定値を使う。
+    state_sync_interval_seconds: int = 30
+    # 注文予約ファイルを置くディレクトリ。未指定時は環境変数またはユーザー領域を使う。
+    state_dir: Optional[str] = None
 
 
 def load_trading_config(path: str) -> TradingConfig:
@@ -101,11 +110,28 @@ def parse_trading_config(raw: Dict[str, Any]) -> TradingConfig:
             raw_limits.get("cancel_after_seconds"),
             "risk_limits.cancel_after_seconds",
         ),
+        market_order_slippage_ratio=_optional_positive_float(
+            raw_limits.get("market_order_slippage_ratio"),
+            "risk_limits.market_order_slippage_ratio",
+            default=0.05,
+        ),
+        max_quote_age_seconds=_optional_non_negative_int(
+            raw_limits.get("max_quote_age_seconds"),
+            "risk_limits.max_quote_age_seconds",
+            default=300,
+        ),
     )
 
     strategy_options = raw.get("strategy_options") or {}
     if not isinstance(strategy_options, dict):
         raise InvalidConfigError("`strategy_options` はテーブルで指定してください。")
+
+    state_sync_interval_seconds = _optional_positive_int(
+        raw.get("state_sync_interval_seconds"),
+        "state_sync_interval_seconds",
+        default=30,
+    )
+    state_dir = _optional_text(raw.get("state_dir"), "state_dir")
 
     if allow_live and not credential_name:
         raise InvalidConfigError(
@@ -121,6 +147,8 @@ def parse_trading_config(raw: Dict[str, Any]) -> TradingConfig:
         credential_name=credential_name,
         risk_limits=risk_limits,
         strategy_options=strategy_options,
+        state_sync_interval_seconds=state_sync_interval_seconds,
+        state_dir=state_dir,
     )
 
 
@@ -202,11 +230,31 @@ def _required_bool(raw: Dict[str, Any], key: str) -> bool:
 def _positive_int(value: Any, name: str) -> int:
     try:
         number = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise InvalidConfigError("`{}` には正の整数を指定してください。".format(name)) from exc
 
     if number <= 0:
         raise InvalidConfigError("`{}` には 1 以上の値を指定してください。".format(name))
+    return number
+
+
+def _optional_positive_int(value: Any, name: str, *, default: int) -> int:
+    if value is None:
+        return default
+    return _positive_int(value, name)
+
+
+def _optional_non_negative_int(value: Any, name: str, *, default: int) -> int:
+    if value is None:
+        return default
+
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise InvalidConfigError("`{}` には 0 以上の整数を指定してください。".format(name)) from exc
+
+    if number < 0:
+        raise InvalidConfigError("`{}` には 0 以上の整数を指定してください。".format(name))
     return number
 
 
@@ -216,9 +264,15 @@ def _positive_float(value: Any, name: str) -> float:
     except (TypeError, ValueError) as exc:
         raise InvalidConfigError("`{}` には正の数値を指定してください。".format(name)) from exc
 
-    if number <= 0:
-        raise InvalidConfigError("`{}` には 0 より大きい値を指定してください。".format(name))
+    if not math.isfinite(number) or number <= 0:
+        raise InvalidConfigError("`{}` には 0 より大きい有限の値を指定してください。".format(name))
     return number
+
+
+def _optional_positive_float(value: Any, name: str, *, default: float) -> float:
+    if value is None:
+        return default
+    return _positive_float(value, name)
 
 
 def _enum_list(value: Any, name: str, allowed_values: set) -> List[str]:
